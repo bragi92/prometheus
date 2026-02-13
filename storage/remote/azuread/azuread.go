@@ -30,7 +30,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/google/uuid"
 	"github.com/grafana/regexp"
-	"software.sslmate.com/src/go-pkcs12"
+	"golang.org/x/crypto/pkcs12"
 )
 
 // Clouds.
@@ -449,14 +449,47 @@ func newCertificateTokenCredential(clientOpts *azcore.ClientOptions, certConfig 
 	isPEM := isPEMFormat(certData)
 	
 	if !isPEM {
-		// Must be PFX/PKCS12 format
-		parsedKey, leafCert, intermediateCerts, err := pkcs12.DecodeChain(certData, certConfig.CertificatePassword)
+		// Must be PFX/PKCS12 format - convert to PEM blocks first
+		pemBlocks, err := pkcs12.ToPEM(certData, certConfig.CertificatePassword)
 		if err != nil {
 			return nil, errors.New("failed to parse PFX certificate " + certConfig.CertificatePath + ": " + err.Error())
 		}
-		privateKey = parsedKey
-		certs = append(certs, leafCert)
-		certs = append(certs, intermediateCerts...)
+
+		// Parse PEM blocks to extract certificates and private key
+		for _, block := range pemBlocks {
+			switch block.Type {
+			case "CERTIFICATE":
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					return nil, errors.New("failed to parse certificate from PFX " + certConfig.CertificatePath + ": " + err.Error())
+				}
+				certs = append(certs, cert)
+			case "PRIVATE KEY":
+				// PKCS8 private key
+				if privateKey == nil { // Only take the first private key
+					privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+					if err != nil {
+						return nil, errors.New("failed to parse PKCS8 private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
+					}
+				}
+			case "RSA PRIVATE KEY":
+				// PKCS1 RSA private key
+				if privateKey == nil { // Only take the first private key
+					privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+					if err != nil {
+						return nil, errors.New("failed to parse RSA private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
+					}
+				}
+			case "EC PRIVATE KEY":
+				// EC private key
+				if privateKey == nil { // Only take the first private key
+					privateKey, err = x509.ParseECPrivateKey(block.Bytes)
+					if err != nil {
+						return nil, errors.New("failed to parse EC private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
+					}
+				}
+			}
+		}
 	} else {
 		// Parse as PEM
 		var err error

@@ -103,7 +103,6 @@ require (
 	k8s.io/client-go v0.35.0
 	k8s.io/klog v1.0.0
 	k8s.io/klog/v2 v2.130.1
-	software.sslmate.com/src/go-pkcs12 v0.7.0
 )
 
 require (
@@ -240,7 +239,7 @@ require (
 	go.opentelemetry.io/collector/pipeline v1.51.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
-	golang.org/x/crypto v0.47.0 // indirect
+	golang.org/x/crypto v0.47.0
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
