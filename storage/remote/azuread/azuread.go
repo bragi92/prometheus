@@ -439,22 +439,24 @@ func newCertificateTokenCredential(clientOpts *azcore.ClientOptions, certConfig 
 	// Read certificate file
 	certData, err := os.ReadFile(certConfig.CertificatePath)
 	if err != nil {
-		return nil, errors.New("failed to read certificate file: " + err.Error())
+		return nil, errors.New("failed to read certificate file " + certConfig.CertificatePath + ": " + err.Error())
 	}
 
 	var certs []*x509.Certificate
 	var privateKey any
 
-	// Try to parse as PFX/PKCS12 first
-	if certConfig.CertificatePassword != "" || !isPEMFormat(certData) {
-		// Parse as PFX
-		parsedKey, parsedCert, parsedCerts, err := pkcs12.DecodeChain(certData, certConfig.CertificatePassword)
+	// Detect format: check if PEM format first, then determine parsing strategy
+	isPEM := isPEMFormat(certData)
+	
+	if !isPEM {
+		// Must be PFX/PKCS12 format
+		parsedKey, leafCert, intermediateCerts, err := pkcs12.DecodeChain(certData, certConfig.CertificatePassword)
 		if err != nil {
-			return nil, errors.New("failed to parse PFX certificate: " + err.Error())
+			return nil, errors.New("failed to parse PFX certificate " + certConfig.CertificatePath + ": " + err.Error())
 		}
 		privateKey = parsedKey
-		certs = append(certs, parsedCert)
-		certs = append(certs, parsedCerts...)
+		certs = append(certs, leafCert)
+		certs = append(certs, intermediateCerts...)
 	} else {
 		// Parse as PEM
 		var err error
@@ -537,32 +539,32 @@ func parsePEMCertificate(certData []byte, certConfig *CertificateConfig) ([]*x50
 	if privateKey == nil && certConfig.CertificateKeyPath != "" {
 		keyData, err := os.ReadFile(certConfig.CertificateKeyPath)
 		if err != nil {
-			return nil, nil, errors.New("failed to read private key file: " + err.Error())
+			return nil, nil, errors.New("failed to read private key file " + certConfig.CertificateKeyPath + ": " + err.Error())
 		}
 
 		block, _ := pem.Decode(keyData)
 		if block == nil {
-			return nil, nil, errors.New("failed to decode PEM private key")
+			return nil, nil, errors.New("failed to decode PEM private key from " + certConfig.CertificateKeyPath)
 		}
 
 		switch block.Type {
 		case "PRIVATE KEY":
 			privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
 			if err != nil {
-				return nil, nil, errors.New("failed to parse PKCS8 private key: " + err.Error())
+				return nil, nil, errors.New("failed to parse PKCS8 private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
 			}
 		case "RSA PRIVATE KEY":
 			privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 			if err != nil {
-				return nil, nil, errors.New("failed to parse RSA private key: " + err.Error())
+				return nil, nil, errors.New("failed to parse RSA private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
 			}
 		case "EC PRIVATE KEY":
 			privateKey, err = x509.ParseECPrivateKey(block.Bytes)
 			if err != nil {
-				return nil, nil, errors.New("failed to parse EC private key: " + err.Error())
+				return nil, nil, errors.New("failed to parse EC private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
 			}
 		default:
-			return nil, nil, errors.New("unsupported private key type: " + block.Type)
+			return nil, nil, errors.New("unsupported private key type in " + certConfig.CertificateKeyPath + ": " + block.Type)
 		}
 	}
 
