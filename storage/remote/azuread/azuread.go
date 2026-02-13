@@ -15,11 +15,8 @@ package azuread
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +27,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/google/uuid"
 	"github.com/grafana/regexp"
-	"golang.org/x/crypto/pkcs12"
+	"github.com/prometheus/prometheus/util/certutil"
 )
 
 // Clouds.
@@ -436,73 +433,20 @@ func newSDKTokenCredential(clientOpts *azcore.ClientOptions, sdkConfig *SDKConfi
 
 // newCertificateTokenCredential returns new certificate-based token credential.
 func newCertificateTokenCredential(clientOpts *azcore.ClientOptions, certConfig *CertificateConfig) (azcore.TokenCredential, error) {
-	// Read certificate file
-	certData, err := os.ReadFile(certConfig.CertificatePath)
+	// Use certutil to parse the certificate files
+	certData, err := certutil.ParseCertificateFiles(
+		certConfig.CertificatePath,
+		certConfig.CertificateKeyPath,
+		certConfig.CertificatePassword,
+	)
 	if err != nil {
-		return nil, errors.New("failed to read certificate file " + certConfig.CertificatePath + ": " + err.Error())
+		return nil, err
 	}
 
-	var certs []*x509.Certificate
-	var privateKey any
-
-	// Detect format: check if PEM format first, then determine parsing strategy
-	isPEM := isPEMFormat(certData)
-	
-	if !isPEM {
-		// Must be PFX/PKCS12 format - convert to PEM blocks first
-		pemBlocks, err := pkcs12.ToPEM(certData, certConfig.CertificatePassword)
-		if err != nil {
-			return nil, errors.New("failed to parse PFX certificate " + certConfig.CertificatePath + ": " + err.Error())
-		}
-
-		// Parse PEM blocks to extract certificates and private key
-		for _, block := range pemBlocks {
-			switch block.Type {
-			case "CERTIFICATE":
-				cert, err := x509.ParseCertificate(block.Bytes)
-				if err != nil {
-					return nil, errors.New("failed to parse certificate from PFX " + certConfig.CertificatePath + ": " + err.Error())
-				}
-				certs = append(certs, cert)
-			case "PRIVATE KEY":
-				// PKCS8 private key
-				if privateKey == nil { // Only take the first private key
-					privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-					if err != nil {
-						return nil, errors.New("failed to parse PKCS8 private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
-					}
-				}
-			case "RSA PRIVATE KEY":
-				// PKCS1 RSA private key
-				if privateKey == nil { // Only take the first private key
-					privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-					if err != nil {
-						return nil, errors.New("failed to parse RSA private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
-					}
-				}
-			case "EC PRIVATE KEY":
-				// EC private key
-				if privateKey == nil { // Only take the first private key
-					privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-					if err != nil {
-						return nil, errors.New("failed to parse EC private key from PFX " + certConfig.CertificatePath + ": " + err.Error())
-					}
-				}
-			}
-		}
-	} else {
-		// Parse as PEM
-		var err error
-		certs, privateKey, err = parsePEMCertificate(certData, certConfig)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if len(certs) == 0 {
+	if len(certData.Certificates) == 0 {
 		return nil, errors.New("no certificates found in certificate file")
 	}
-	if privateKey == nil {
+	if certData.PrivateKey == nil {
 		return nil, errors.New("no private key found")
 	}
 
@@ -514,94 +458,10 @@ func newCertificateTokenCredential(clientOpts *azcore.ClientOptions, certConfig 
 	return azidentity.NewClientCertificateCredential(
 		certConfig.TenantID,
 		certConfig.ClientID,
-		certs,
-		privateKey,
+		certData.Certificates,
+		certData.PrivateKey,
 		opts,
 	)
-}
-
-// isPEMFormat checks if data is in PEM format.
-func isPEMFormat(data []byte) bool {
-	block, _ := pem.Decode(data)
-	return block != nil
-}
-
-// parsePEMCertificate parses PEM-encoded certificate and private key.
-func parsePEMCertificate(certData []byte, certConfig *CertificateConfig) ([]*x509.Certificate, any, error) {
-	var certs []*x509.Certificate
-	var privateKey any
-
-	// Parse certificates from main certificate file
-	rest := certData
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-
-		switch block.Type {
-		case "CERTIFICATE":
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse certificate: " + err.Error())
-			}
-			certs = append(certs, cert)
-		case "PRIVATE KEY":
-			var err error
-			privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse PKCS8 private key: " + err.Error())
-			}
-		case "RSA PRIVATE KEY":
-			var err error
-			privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse RSA private key: " + err.Error())
-			}
-		case "EC PRIVATE KEY":
-			var err error
-			privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse EC private key: " + err.Error())
-			}
-		}
-	}
-
-	// If no private key found in main file and separate key file is provided, read it
-	if privateKey == nil && certConfig.CertificateKeyPath != "" {
-		keyData, err := os.ReadFile(certConfig.CertificateKeyPath)
-		if err != nil {
-			return nil, nil, errors.New("failed to read private key file " + certConfig.CertificateKeyPath + ": " + err.Error())
-		}
-
-		block, _ := pem.Decode(keyData)
-		if block == nil {
-			return nil, nil, errors.New("failed to decode PEM private key from " + certConfig.CertificateKeyPath)
-		}
-
-		switch block.Type {
-		case "PRIVATE KEY":
-			privateKey, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse PKCS8 private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
-			}
-		case "RSA PRIVATE KEY":
-			privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse RSA private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
-			}
-		case "EC PRIVATE KEY":
-			privateKey, err = x509.ParseECPrivateKey(block.Bytes)
-			if err != nil {
-				return nil, nil, errors.New("failed to parse EC private key from " + certConfig.CertificateKeyPath + ": " + err.Error())
-			}
-		default:
-			return nil, nil, errors.New("unsupported private key type in " + certConfig.CertificateKeyPath + ": " + block.Type)
-		}
-	}
-
-	return certs, privateKey, nil
 }
 
 // newTokenProvider helps to fetch accessToken for different types of credential. This also takes care of
