@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-// TestIsPEMFormat tests the PEM format detection
+// TestIsPEMFormat tests the PEM format detection.
 func TestIsPEMFormat(t *testing.T) {
 	tests := []struct {
 		name     string
