@@ -73,7 +73,6 @@ jobs:
                   tenant_id: "${AZURE_TENANT_ID}"
                   certificate_path: /tmp/certs/cert.pem
                   certificate_key_path: /tmp/certs/key.pem
-                  send_certificate_chain: true
           EOF
           # Strip leading whitespace from heredoc indentation
           sed -i 's/^          //' /tmp/prometheus.yml
