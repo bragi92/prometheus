@@ -2,6 +2,9 @@
 name: Test Azure AD Certificate Auth
 
 on:
+  push:
+    branches:
+      - 'copilot/add-azuread-certificate-configuration'
   workflow_dispatch:
     inputs:
       run_duration:
