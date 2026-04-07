@@ -92,7 +92,8 @@ jobs:
             --config.file=/tmp/prometheus.yml \
             --storage.tsdb.path=/tmp/prometheus-data \
             --web.listen-address=:9090 \
-            --log.level=debug &
+            --log.level=debug \
+            > /tmp/prometheus.log 2>&1 &
           PROM_PID=$!
           echo "PROM_PID=$PROM_PID" >> "$GITHUB_ENV"
 
@@ -100,8 +101,13 @@ jobs:
           echo "Waiting for Prometheus to start..."
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9090/-/ready > /dev/null 2>&1; then
-              echo "Prometheus is ready."
+              echo "Prometheus is ready (PID=$PROM_PID)."
               break
+            fi
+            if ! kill -0 "$PROM_PID" 2>/dev/null; then
+              echo "❌ Prometheus process died during startup!"
+              cat /tmp/prometheus.log
+              exit 1
             fi
             sleep 2
           done
@@ -110,7 +116,19 @@ jobs:
         run: |
           DURATION=${{ github.event.inputs.run_duration || '120' }}
           echo "Running Prometheus for ${DURATION}s to allow remote write..."
-          sleep "$DURATION"
+          # Check every 15s that Prometheus is still alive
+          ELAPSED=0
+          while [ "$ELAPSED" -lt "$DURATION" ]; do
+            if ! kill -0 "$PROM_PID" 2>/dev/null; then
+              echo "❌ Prometheus crashed after ${ELAPSED}s!"
+              echo "=== Last 200 lines of Prometheus logs ==="
+              tail -200 /tmp/prometheus.log
+              exit 1
+            fi
+            sleep 15
+            ELAPSED=$((ELAPSED + 15))
+          done
+          echo "Prometheus still running after ${DURATION}s ✓"
 
       - name: Check remote write status
         run: |
@@ -173,13 +191,26 @@ jobs:
       - name: Collect Prometheus logs on failure
         if: failure()
         run: |
-          echo "=== Prometheus stderr (last 100 lines) ==="
-          # Prometheus logs to stderr by default; grab from the process
-          journalctl -u prometheus --no-pager -n 100 2>/dev/null || true
+          echo "=== Prometheus logs (last 200 lines) ==="
+          tail -200 /tmp/prometheus.log 2>/dev/null || echo "No log file found"
+
+          echo ""
+          echo "=== Process status ==="
+          if kill -0 "$PROM_PID" 2>/dev/null; then
+            echo "Prometheus PID $PROM_PID is still running"
+          else
+            echo "Prometheus PID $PROM_PID is NOT running"
+          fi
 
           echo ""
           echo "=== Config validation ==="
           ./promtool check config /tmp/prometheus.yml || true
+
+          echo ""
+          echo "=== Certificate files ==="
+          ls -la /tmp/certs/ 2>/dev/null || true
+          echo "--- cert.pem header ---"
+          head -5 /tmp/certs/cert.pem 2>/dev/null || true
 
           echo ""
           echo "=== WAL status ==="
