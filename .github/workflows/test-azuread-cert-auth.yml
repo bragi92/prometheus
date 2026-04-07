@@ -1,0 +1,194 @@
+---
+name: Test Azure AD Certificate Auth
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_duration:
+        description: 'How long to run Prometheus (in seconds) before checking results'
+        required: false
+        default: '120'
+
+permissions:
+  contents: read
+
+# Required GitHub Actions Secrets:
+#   AZURE_CLIENT_ID          - Azure AD application (client) ID
+#   AZURE_TENANT_ID          - Azure AD tenant ID
+#   AZURE_CERT_PEM           - PEM-encoded certificate (base64)
+#   AZURE_CERT_KEY_PEM       - PEM-encoded private key (base64)
+
+jobs:
+  test-cert-auth:
+    name: Build & test Azure AD certificate auth
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/prometheus/golang-builder:1.25-base
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup promci
+        uses: prometheus/promci@fc721ff8497a70a93a881cd552b71af7fb3a9d53 # v0.5.4
+
+      - name: Setup environment
+        uses: ./.github/promci/actions/setup_environment
+        with:
+          enable_npm: true
+
+      - name: Build Prometheus binary
+        run: make build
+
+      - name: Write certificate files
+        run: |
+          mkdir -p /tmp/certs
+          echo "${{ secrets.AZURE_CERT_PEM }}" | base64 -d > /tmp/certs/cert.pem
+          echo "${{ secrets.AZURE_CERT_KEY_PEM }}" | base64 -d > /tmp/certs/key.pem
+          chmod 600 /tmp/certs/key.pem
+
+      - name: Generate prometheus.yml
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          cat > /tmp/prometheus.yml <<EOF
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: "self"
+              static_configs:
+                - targets: ["localhost:9090"]
+
+          remote_write:
+            - url: "https://kaveeshossprom-pehn.uksouth-1.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-db0ff9561e9f46b4a62e922676d8badb/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24"
+              azuread:
+                cloud: AzurePublic
+                certificate:
+                  client_id: "${AZURE_CLIENT_ID}"
+                  tenant_id: "${AZURE_TENANT_ID}"
+                  certificate_path: /tmp/certs/cert.pem
+                  certificate_key_path: /tmp/certs/key.pem
+                  send_certificate_chain: true
+          EOF
+          # Strip leading whitespace from heredoc indentation
+          sed -i 's/^          //' /tmp/prometheus.yml
+
+      - name: Validate config with promtool
+        run: ./promtool check config /tmp/prometheus.yml
+
+      - name: Start Prometheus
+        run: |
+          ./prometheus \
+            --config.file=/tmp/prometheus.yml \
+            --storage.tsdb.path=/tmp/prometheus-data \
+            --web.listen-address=:9090 \
+            --log.level=debug &
+          PROM_PID=$!
+          echo "PROM_PID=$PROM_PID" >> "$GITHUB_ENV"
+
+          # Wait for Prometheus to be ready
+          echo "Waiting for Prometheus to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9090/-/ready > /dev/null 2>&1; then
+              echo "Prometheus is ready."
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Wait for data to be sent
+        run: |
+          DURATION=${{ github.event.inputs.run_duration || '120' }}
+          echo "Running Prometheus for ${DURATION}s to allow remote write..."
+          sleep "$DURATION"
+
+      - name: Check remote write status
+        run: |
+          echo "=== Prometheus Build Info ==="
+          curl -s http://localhost:9090/api/v1/status/buildinfo | head -20
+
+          echo ""
+          echo "=== Remote Write Status ==="
+          # Check remote write metrics for success/failure
+          curl -s http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_total 2>/dev/null | python3 -m json.tool || true
+
+          echo ""
+          echo "=== Remote Write Failures ==="
+          curl -s http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_failed_total 2>/dev/null | python3 -m json.tool || true
+
+          echo ""
+          echo "=== Remote Write Retries ==="
+          curl -s http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_retried_total 2>/dev/null | python3 -m json.tool || true
+
+          echo ""
+          echo "=== Sent Samples (last 5 min) ==="
+          curl -s 'http://localhost:9090/api/v1/query?query=rate(prometheus_remote_storage_samples_total[5m])' 2>/dev/null | python3 -m json.tool || true
+
+          echo ""
+          echo "=== Remote Write Pending Samples ==="
+          curl -s http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_pending 2>/dev/null | python3 -m json.tool || true
+
+      - name: Verify data was sent successfully
+        run: |
+          # Check that samples were sent and none failed
+          SENT=$(curl -s 'http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_total' | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('data', {}).get('result', [])
+          total = sum(float(r['value'][1]) for r in results)
+          print(int(total))
+          " 2>/dev/null || echo "0")
+
+          FAILED=$(curl -s 'http://localhost:9090/api/v1/query?query=prometheus_remote_storage_samples_failed_total' | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('data', {}).get('result', [])
+          total = sum(float(r['value'][1]) for r in results)
+          print(int(total))
+          " 2>/dev/null || echo "0")
+
+          echo "Samples sent:   $SENT"
+          echo "Samples failed: $FAILED"
+
+          if [ "$SENT" -gt 0 ] && [ "$FAILED" -eq 0 ]; then
+            echo "✅ SUCCESS: Data is flowing to Azure Monitor Workspace with certificate auth!"
+          elif [ "$SENT" -gt 0 ] && [ "$FAILED" -gt 0 ]; then
+            echo "⚠️  PARTIAL: Some samples sent ($SENT) but some failed ($FAILED)"
+            exit 1
+          else
+            echo "❌ FAILURE: No samples were sent to Azure Monitor Workspace"
+            exit 1
+          fi
+
+      - name: Collect Prometheus logs on failure
+        if: failure()
+        run: |
+          echo "=== Prometheus stderr (last 100 lines) ==="
+          # Prometheus logs to stderr by default; grab from the process
+          journalctl -u prometheus --no-pager -n 100 2>/dev/null || true
+
+          echo ""
+          echo "=== Config validation ==="
+          ./promtool check config /tmp/prometheus.yml || true
+
+          echo ""
+          echo "=== WAL status ==="
+          ls -la /tmp/prometheus-data/wal/ 2>/dev/null || true
+
+      - name: Stop Prometheus
+        if: always()
+        run: |
+          if [ -n "$PROM_PID" ]; then
+            kill "$PROM_PID" 2>/dev/null || true
+            wait "$PROM_PID" 2>/dev/null || true
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf /tmp/certs /tmp/prometheus-data /tmp/prometheus.yml
