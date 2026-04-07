@@ -46,10 +46,13 @@ jobs:
         run: make build
 
       - name: Write certificate files
+        env:
+          CERT_PEM: ${{ secrets.AZURE_CERT_PEM }}
+          CERT_KEY_PEM: ${{ secrets.AZURE_CERT_KEY_PEM }}
         run: |
           mkdir -p /tmp/certs
-          echo "${{ secrets.AZURE_CERT_PEM }}" | base64 -d > /tmp/certs/cert.pem
-          echo "${{ secrets.AZURE_CERT_KEY_PEM }}" | base64 -d > /tmp/certs/key.pem
+          printf '%s\n' "$CERT_PEM" > /tmp/certs/cert.pem
+          printf '%s\n' "$CERT_KEY_PEM" > /tmp/certs/key.pem
           chmod 600 /tmp/certs/key.pem
 
       - name: Generate prometheus.yml
