@@ -71,7 +71,7 @@ jobs:
                 - targets: ["localhost:9090"]
 
           remote_write:
-            - url: "https://kaveeshcertificate-ws5t.westus2-1.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-f1f62a02dddd4fd6a850be341a7e6b38/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24"
+            - url: "https://prom-cert-test-ws-un7i.westus2-1.metrics.ingest.monitor.azure.com/dataCollectionRules/dcr-94caf72ee2dd4407bbb210b5d950a97f/streams/Microsoft-PrometheusMetrics/api/v1/write?api-version=2023-04-24"
               azuread:
                 cloud: AzurePublic
                 certificate:
